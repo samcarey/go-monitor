@@ -12,6 +12,7 @@ import (
     "strconv"
     "image"
     "image/draw"
+    "math"
     //"reflect"
 )
 
@@ -73,7 +74,7 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     }
 
     ngrid_cols := 4
-    ngrid_rows := int(float64(ncols) / float64(ngrid_cols) + 0.5)
+    ngrid_rows := int(math.Ceil(float64(ncols) / float64(ngrid_cols)))
 
     db, err := sql.Open("sqlite3", "/home/pi/fccFreqs.db")
     if err != nil {	fmt.Println("Failed to create the db handle") }
@@ -106,6 +107,9 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     rec := image.Rectangle{sp, sp.Add(img.Bounds().Size())}
     draw.Draw(rgba, rec, img, image.Point{0, 0}, draw.Src)
 
+    fmt.Printf("ngrid_rows: %d\n", ngrid_rows)
+    fmt.Printf("ngrid_cols: %d\n", ngrid_cols)
+
     col_counter := 0
     for i := 0 ; i < ngrid_rows ; i++ {
         for j := 0 ; j < ngrid_cols ; j++ {
@@ -114,9 +118,10 @@ func homepage(w http.ResponseWriter, r *http.Request) {
                 continue
             }
             if col_counter < ncols {
+                fmt.Printf("col_counter / ncols: %d / %d\n", col_counter, ncols)
                 img := get_image("TestName", cols[col_counter], time_vals)
                 col_counter++
-                sp  := image.Point{ngrid_cols*width, ngrid_rows*height}
+                sp  := image.Point{j*width, i*height}
                 rec := image.Rectangle{sp, sp.Add(img.Bounds().Size())}
                 draw.Draw(rgba, rec, img, image.Point{0, 0}, draw.Src)
             }
