@@ -14,44 +14,90 @@ import (
     "image/draw"
     "math"
     //"reflect"
+    "html/template"
+    "encoding/json"
+    "os"
 )
+
+type Configuration struct {
+    Red float64
+    Green string
+    Blue string
+    Flowrate string
+    Salinity string
+    Timesampled string
+}
 
 func main() {
     http.HandleFunc("/", homepage) // setting router rule
 	http.HandleFunc("/insert", insert)  // setting router rule
+    http.HandleFunc("/config", config)
     http.ListenAndServe(":8080", nil) // start server 
 }
 
-func get_image(name string, data []float64, axis []float64) image.Image {
-    graph := chart.Chart{
-        XAxis: chart.XAxis{
-            Name:      "The XAxis",
-            NameStyle: chart.StyleShow(),
-            Style:     chart.StyleShow(),
-        },
-        YAxis: chart.YAxis{
-            Name:      "The YAxis",
-            NameStyle: chart.StyleShow(),
-            Style:     chart.StyleShow(),
-        },
-        Series: []chart.Series{
-            chart.ContinuousSeries{
-                Style: chart.Style{
-                    Show:        true,
-                    StrokeColor: chart.GetDefaultColor(0).WithAlpha(64),
-                    FillColor:   chart.GetDefaultColor(0).WithAlpha(64),
-                },
-                XValues: axis,
-                YValues: data,
-            },
-        },
-    }
+func config(w http.ResponseWriter, r *http.Request) {
+    fmt.Println("method:", r.Method) //get request method
+    if r.Method == "GET" {
+        t, _ := template.ParseFiles("config.gtpl")
+        t.Execute(w, nil)
+    } else {
+        // POST method 
 
-    collector := &chart.ImageWriter{}
-    graph.Render(chart.PNG, collector)
-    img, err := collector.Image()
-    _ = err
-    return img
+        // Read config file or create default config
+        config_file_name := "/home/pi/config.json"
+        configuration := Configuration{}
+        new_config := false
+        if _, err := os.Stat(config_file_name); os.IsNotExist(err) {
+            new_config = true
+        }
+        file, _ := os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
+        defer file.Close()
+
+        if new_config {
+            configuration.Red = 15.0
+            configuration.Green = "16"
+            configuration.Blue = "17"
+            configuration.Flowrate = "18"
+            configuration.Salinity = "19"
+            configuration.Timesampled = "20"
+        }else{
+            decoder := json.NewDecoder(file)
+            err := decoder.Decode(&configuration)
+            if err != nil {
+                fmt.Println("error:", err)
+            }
+        }
+
+        // Make any changes to the config
+        r.ParseForm()
+        if red, err := strconv.ParseFloat(r.Form.Get("red"), 64) ; err == nil {configuration.Red = red}
+        if green := r.Form["green"] ; len(green[0]) > 0 {configuration.Green = green[0]}
+        if blue := r.Form["blue"] ; len(blue[0]) > 0 {configuration.Blue = blue[0]}
+        if flowrate := r.Form["flowrate"] ; len(flowrate[0]) > 0 {configuration.Flowrate = flowrate[0]}
+        if salinity := r.Form["salinity"] ; len(salinity[0]) > 0 {configuration.Salinity = salinity[0]}
+        if timesampled := r.Form["timesampled"] ; len(timesampled[0]) > 0 {configuration.Timesampled = timesampled[0]}
+      
+        // List config 
+        fmt.Println("New Configuration:")
+        fmt.Printf("red: %f\n", configuration.Red)
+        fmt.Printf("green: %s\n", configuration.Green)
+        fmt.Printf("blue: %s\n", configuration.Blue)
+        fmt.Printf("flowrate: %s\n", configuration.Flowrate)
+        fmt.Printf("salinity: %s\n", configuration.Salinity)
+        fmt.Printf("timesampled: %s\n", configuration.Timesampled)
+        
+        // Write new config file
+        encoded, err := json.Marshal(configuration)
+        if err != nil {
+            http.Error(w, err.Error(), 500)
+            return
+        }
+        file.Close()
+        os.Remove(config_file_name)
+        file, _ = os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
+        file.Write(encoded)
+        file.Close()
+    }
 }
 
 func homepage(w http.ResponseWriter, r *http.Request) {
@@ -66,11 +112,6 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     entries := make([]float64, ncols*num_rows)
     for i := range cols {
         cols[i], entries = entries[:num_rows], entries[num_rows:]
-    }
-
-    time_vals := make([]float64, num_rows)
-    for i := range time_vals {
-        time_vals[i] = float64(i)
     }
 
     ngrid_cols := 4
@@ -95,8 +136,33 @@ func homepage(w http.ResponseWriter, r *http.Request) {
 		if err != nil {	log.Fatal(err) }
         row_counter++
 	}
-  
-    img := get_image("TestName", cols[0], time_vals)
+
+    max_val := 1e-12
+    min_val := 1e12
+    for i:= 0 ; i < len(cols) ; i++ {
+        for j := 0 ; j < len(cols[0]) ; j++ {
+            if cols[i][j] > max_val {
+                max_val = cols[i][j]
+            }
+            if cols[i][j] < min_val {
+                min_val = cols[i][j]
+            }
+        }
+    }
+
+    num_counts := 256
+    hist_vals := make([]float64, num_counts)
+    hist_val_inc := (max_val - min_val) / float64(num_counts)
+    hist_val := min_val
+    for i := range hist_vals {
+        hist_vals[i] = hist_val
+        hist_val += hist_val_inc
+    }
+
+ 
+    histogram := get_histogram(cols[0], min_val, max_val, num_counts)
+    img := get_image("TestName", histogram, hist_vals, col_names[0])
+
     width := img.Bounds().Dx()
     height := img.Bounds().Dy()
 
@@ -107,8 +173,8 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     rec := image.Rectangle{sp, sp.Add(img.Bounds().Size())}
     draw.Draw(rgba, rec, img, image.Point{0, 0}, draw.Src)
 
-    fmt.Printf("ngrid_rows: %d\n", ngrid_rows)
-    fmt.Printf("ngrid_cols: %d\n", ngrid_cols)
+    //fmt.Printf("ngrid_rows: %d\n", ngrid_rows)
+    //fmt.Printf("ngrid_cols: %d\n", ngrid_cols)
 
     col_counter := 0
     for i := 0 ; i < ngrid_rows ; i++ {
@@ -119,7 +185,8 @@ func homepage(w http.ResponseWriter, r *http.Request) {
             }
             if col_counter < ncols {
                 fmt.Printf("col_counter / ncols: %d / %d\n", col_counter, ncols)
-                img := get_image("TestName", cols[col_counter], time_vals)
+                histogram := get_histogram(cols[col_counter], min_val, max_val, num_counts)
+                img := get_image("TestName", histogram, hist_vals, col_names[col_counter])
                 col_counter++
                 sp  := image.Point{j*width, i*height}
                 rec := image.Rectangle{sp, sp.Add(img.Bounds().Size())}
@@ -189,3 +256,50 @@ func insert(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "failure")
 	}
 }
+
+func get_image(name string, data []float64, axis []float64, xaxis_label string) image.Image {
+    graph := chart.Chart{
+        XAxis: chart.XAxis{
+            Name:      xaxis_label,
+            NameStyle: chart.StyleShow(),
+            Style:     chart.StyleShow(),
+        },
+        YAxis: chart.YAxis{
+            Name:      "Count",
+            NameStyle: chart.StyleShow(),
+            Style:     chart.StyleShow(),
+        },
+        Series: []chart.Series{
+            chart.ContinuousSeries{
+                Style: chart.Style{
+                    Show:        true,
+                    StrokeColor: chart.GetDefaultColor(0).WithAlpha(64),
+                    FillColor:   chart.GetDefaultColor(0).WithAlpha(64),
+                },
+                XValues: axis,
+                YValues: data,
+            },
+        },
+    }
+
+    collector := &chart.ImageWriter{}
+    graph.Render(chart.PNG, collector)
+    img, err := collector.Image()
+    _ = err
+    return img
+}
+
+func get_histogram(data []float64, min float64, max float64, num_counts int) []float64 {
+    counts := make([]float64, num_counts)
+    a := max
+    b := min
+    c := float64(num_counts-1)
+    d := float64(0)
+    slope := (c-d)/(a-b)
+    intercept := (d*a-b*c)/(a-b)
+    for i := 0 ; i < len(data) ; i++ {
+        counts[int(data[i]*slope + intercept + 0.5)]++
+    }
+    return counts
+}
+
