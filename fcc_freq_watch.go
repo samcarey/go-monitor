@@ -34,18 +34,18 @@ func main() {
 }
 
 func homepage(w http.ResponseWriter, r *http.Request) {
-    t, _ := template.ParseFiles("home.gtpl")
+    t, _ := template.ParseFiles("/home/pi/gopath/src/github.com/samcarey/go-monitor/home.gtpl")
     t.Execute(w, nil)
 }
 
 func shutdown(w http.ResponseWriter, r *http.Request) {
-    t, _ := template.ParseFiles("shutdown.gtpl")
+    t, _ := template.ParseFiles("/home/pi/gopath/src/github.com/samcarey/go-monitor/shutdown.gtpl")
     t.Execute(w, nil)
     binary, lookErr := exec.LookPath("shutdown")
     if lookErr != nil {
         panic(lookErr)
     }
-    args := []string{"shutdown", "-h", "now"}
+    args := []string{"sudo shutdown", "-h", "now"}
     env := os.Environ()
     execErr := syscall.Exec(binary, args, env)
     if execErr != nil {
@@ -56,7 +56,7 @@ func shutdown(w http.ResponseWriter, r *http.Request) {
 func config(w http.ResponseWriter, r *http.Request) {
     fmt.Println("method:", r.Method) //get request method
     if r.Method == "GET" {
-        t, _ := template.ParseFiles("config.gtpl")
+        t, _ := template.ParseFiles("/home/pi/gopath/src/github.com/samcarey/go-monitor/config.gtpl")
         t.Execute(w, nil)
     } else {
         // POST method 
@@ -153,16 +153,16 @@ func plot(w http.ResponseWriter, r *http.Request) {
     db, err := sql.Open("sqlite3", config.Database_name)
     if err != nil {	fmt.Println("Failed to create the db handle") }
 
-    rows, err := db.Query(strings.Join([]string{"SELECT * FROM table1 ASC limit", strconv.Itoa(config.Nrows)}," "))
+    rows, err := db.Query(strings.Join([]string{"SELECT * FROM table1 ORDER BY ID DESC limit", strconv.Itoa(config.Nrows)}," "))
     //rows, err := db.Query("SELECT * FROM table1")
     if err != nil {	log.Fatal(err) }
     nrows := 0
     for rows.Next() {nrows++}
     rows.Close()
-    rows, err = db.Query(strings.Join([]string{"SELECT * FROM table1 ASC limit", strconv.Itoa(nrows)}," "))
+    rows, err = db.Query(strings.Join([]string{"SELECT * FROM table1 ORDER BY ID DESC limit", strconv.Itoa(nrows)}," "))
     //rows, err := db.Query("SELECT * FROM table1")
     if err != nil {	log.Fatal(err) }
-
+    defer rows.Close()
     fmt.Printf("Retrieved / Requested: %d / %d\n", nrows, config.Nrows)
 
     ncols := len(col_names)
@@ -174,15 +174,15 @@ func plot(w http.ResponseWriter, r *http.Request) {
 
     ngrid_cols := 4
     ngrid_rows := int(math.Ceil(float64(ncols) / float64(ngrid_cols)))
-    
+    id := 0
+
     for i := 0 ; i < nrows && rows.Next() ; i++ {
 		err := rows.Scan(
+            &id,
             &cols[0][i], &cols[1][i], &cols[2][i], &cols[3][i], &cols[4][i], &cols[5][i], &cols[6][i], 
             &cols[7][i], &cols[8][i], &cols[9][i], &cols[10][i], &cols[11][i], &cols[12][i])
-		
 		if err != nil {	log.Fatal(err) }
 	}
-
 
     min_val := config.Min_val
     max_val := config.Max_val
