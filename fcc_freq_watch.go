@@ -7,6 +7,7 @@ import (
     "net/http"
     _ "github.com/mattn/go-sqlite3"
     "github.com/wcharczuk/go-chart"
+    "github.com/wcharczuk/go-chart/drawing"
     "image/png"
     "bytes"
     "strconv"
@@ -17,22 +18,39 @@ import (
     "html/template"
     "encoding/json"
     "os"
+    "syscall"
+    "os/exec"
+    "strings"
 )
 
-type Configuration struct {
-    Red float64
-    Green string
-    Blue string
-    Flowrate string
-    Salinity string
-    Timesampled string
-}
+var config_file_name = "/home/pi/config.json"
 
 func main() {
     http.HandleFunc("/", homepage) // setting router rule
-	http.HandleFunc("/insert", insert)  // setting router rule
+	http.HandleFunc("/plot", plot)  // setting router rule
     http.HandleFunc("/config", config)
+    http.HandleFunc("/shutdown", shutdown)
     http.ListenAndServe(":8080", nil) // start server 
+}
+
+func homepage(w http.ResponseWriter, r *http.Request) {
+    t, _ := template.ParseFiles("home.gtpl")
+    t.Execute(w, nil)
+}
+
+func shutdown(w http.ResponseWriter, r *http.Request) {
+    t, _ := template.ParseFiles("shutdown.gtpl")
+    t.Execute(w, nil)
+    binary, lookErr := exec.LookPath("shutdown")
+    if lookErr != nil {
+        panic(lookErr)
+    }
+    args := []string{"shutdown", "-h", "now"}
+    env := os.Environ()
+    execErr := syscall.Exec(binary, args, env)
+    if execErr != nil {
+        panic(execErr)
+    }
 }
 
 func config(w http.ResponseWriter, r *http.Request) {
@@ -42,117 +60,150 @@ func config(w http.ResponseWriter, r *http.Request) {
         t.Execute(w, nil)
     } else {
         // POST method 
-
-        // Read config file or create default config
-        config_file_name := "/home/pi/config.json"
-        configuration := Configuration{}
-        new_config := false
-        if _, err := os.Stat(config_file_name); os.IsNotExist(err) {
-            new_config = true
-        }
-        file, _ := os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
-        defer file.Close()
-
-        if new_config {
-            configuration.Red = 15.0
-            configuration.Green = "16"
-            configuration.Blue = "17"
-            configuration.Flowrate = "18"
-            configuration.Salinity = "19"
-            configuration.Timesampled = "20"
-        }else{
-            decoder := json.NewDecoder(file)
-            err := decoder.Decode(&configuration)
-            if err != nil {
-                fmt.Println("error:", err)
-            }
-        }
+        config := get_config()
 
         // Make any changes to the config
         r.ParseForm()
-        if red, err := strconv.ParseFloat(r.Form.Get("red"), 64) ; err == nil {configuration.Red = red}
-        if green := r.Form["green"] ; len(green[0]) > 0 {configuration.Green = green[0]}
-        if blue := r.Form["blue"] ; len(blue[0]) > 0 {configuration.Blue = blue[0]}
-        if flowrate := r.Form["flowrate"] ; len(flowrate[0]) > 0 {configuration.Flowrate = flowrate[0]}
-        if salinity := r.Form["salinity"] ; len(salinity[0]) > 0 {configuration.Salinity = salinity[0]}
-        if timesampled := r.Form["timesampled"] ; len(timesampled[0]) > 0 {configuration.Timesampled = timesampled[0]}
-      
-        // List config 
-        fmt.Println("New Configuration:")
-        fmt.Printf("red: %f\n", configuration.Red)
-        fmt.Printf("green: %s\n", configuration.Green)
-        fmt.Printf("blue: %s\n", configuration.Blue)
-        fmt.Printf("flowrate: %s\n", configuration.Flowrate)
-        fmt.Printf("salinity: %s\n", configuration.Salinity)
-        fmt.Printf("timesampled: %s\n", configuration.Timesampled)
-        
+        if samp_rate, err := strconv.ParseFloat(r.Form.Get("samp_rate"), 64) ; err == nil {
+            config.Samp_rate = samp_rate
+        }
+        if nrows, err := strconv.ParseInt(r.Form.Get("nrows"), 10, 64) ; err == nil {
+            config.Nrows = int(nrows)
+        }
+        if database_name := r.Form["database_name"] ; len(database_name[0]) > 0 {
+            config.Database_name = database_name[0]
+        }
+        if autoscale, err := strconv.ParseBool(r.Form.Get("autoscale")) ; err == nil {
+            config.Autoscale = autoscale
+        }else{
+            if autoscale_int, err := strconv.ParseInt(r.Form.Get("autoscale"), 10, 64) ; err == nil {
+                if autoscale_int == 0 {
+                    config.Autoscale = false
+                }else{
+                    if autoscale_int == 1 {
+                        config.Autoscale = true
+                    }
+                }
+            }
+        }
+        if min_val, err := strconv.ParseFloat(r.Form.Get("min_val"), 64) ; err == nil {
+            config.Min_val = min_val
+        }
+        if max_val, err := strconv.ParseFloat(r.Form.Get("max_val"), 64) ; err == nil {
+            config.Max_val = max_val
+        }
+        if nhist_points, err := strconv.ParseInt(r.Form.Get("nhist_points"), 10, 64) ; err == nil {
+            config.Nhist_points = int(nhist_points)
+        }
+
         // Write new config file
-        encoded, err := json.Marshal(configuration)
+        encoded, err := json.Marshal(config)
         if err != nil {
             http.Error(w, err.Error(), 500)
             return
         }
-        file.Close()
         os.Remove(config_file_name)
-        file, _ = os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
+        file, _ := os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
         file.Write(encoded)
         file.Close()
+
+        //fmt.Fprintf(w, "success")
+        // List config on server
+        fmt.Printf("New Configuration:\n")
+        fmt.Printf("Sample Rate (rows/sec): %f\n", config.Samp_rate)
+        fmt.Printf("Num Rows: %d (%f hours)\n", config.Nrows,(float64(config.Nrows)/(config.Samp_rate*3600.0)))
+        fmt.Printf("Database Name: %s\n", config.Database_name)
+        fmt.Printf("Autoscale: %t\n", config.Autoscale)
+        fmt.Printf("Min Val (autoscale off): %f\n", config.Min_val)
+        fmt.Printf("Max Val (autoscale off): %f\n", config.Max_val)
+        fmt.Printf("Num Histogram Points: %d\n", config.Nhist_points)
+        
+        // List config on page
+        fmt.Fprintf(w, "New Configuration:\n")
+        fmt.Fprintf(w, "Sample Rate (rows/sec): %f\n", config.Samp_rate)
+        fmt.Fprintf(w, "Num Rows: %d (%f hours)\n", config.Nrows,(float64(config.Nrows)/(config.Samp_rate*3600.0)))
+        fmt.Fprintf(w, "Database Name: %s\n", config.Database_name)
+        fmt.Fprintf(w, "Autoscale: %t\n", config.Autoscale)
+        fmt.Fprintf(w, "Min Val (autoscale off): %f\n", config.Min_val)
+        fmt.Fprintf(w, "Max Val (autoscale off): %f\n", config.Max_val)
+        fmt.Fprintf(w, "Number of Histogram Points: %d\n", config.Nhist_points)
     }
 }
 
-func homepage(w http.ResponseWriter, r *http.Request) {
-    
-    num_rows := 300
+type Configuration struct {
+    Samp_rate float64
+    Nrows int
+    Database_name string
+    Autoscale bool
+    Min_val float64
+    Max_val float64
+    Nhist_points int
+}
+
+func plot(w http.ResponseWriter, r *http.Request) {
+    config := get_config()
+
     col_names := []string{"461.025 MHz", "461.075 MHz", "461.1 MHz", "462.155 MHz", 
                           "462.375 MHz", "462.4 MHz", "464.5 MHz", "464.55 MHz", "464.6 MHz", 
                           "464.625 MHz", "464.65 MHz", "464.725 MHz", "464.75 MHz"}
-    
+
+    for i := 0 ; i < len(col_names) ; i++ {
+        col_names[i] = strings.Join([]string{"Power [dB] at", col_names[i]}," ")
+    }
+    db, err := sql.Open("sqlite3", config.Database_name)
+    if err != nil {	fmt.Println("Failed to create the db handle") }
+
+    rows, err := db.Query(strings.Join([]string{"SELECT * FROM table1 ASC limit", strconv.Itoa(config.Nrows)}," "))
+    //rows, err := db.Query("SELECT * FROM table1")
+    if err != nil {	log.Fatal(err) }
+    nrows := 0
+    for rows.Next() {nrows++}
+    rows.Close()
+    rows, err = db.Query(strings.Join([]string{"SELECT * FROM table1 ASC limit", strconv.Itoa(nrows)}," "))
+    //rows, err := db.Query("SELECT * FROM table1")
+    if err != nil {	log.Fatal(err) }
+
+    fmt.Printf("Retrieved / Requested: %d / %d\n", nrows, config.Nrows)
+
     ncols := len(col_names)
     cols := make([][]float64, ncols)
-    entries := make([]float64, ncols*num_rows)
+    entries := make([]float64, ncols*nrows)
     for i := range cols {
-        cols[i], entries = entries[:num_rows], entries[num_rows:]
+        cols[i], entries = entries[:nrows], entries[nrows:]
     }
 
     ngrid_cols := 4
     ngrid_rows := int(math.Ceil(float64(ncols) / float64(ngrid_cols)))
-
-    db, err := sql.Open("sqlite3", "/home/pi/fccFreqs.db")
-    if err != nil {	fmt.Println("Failed to create the db handle") }
-
-    rows, err := db.Query("SELECT * FROM table1")
-    if err != nil {	log.Fatal(err) }
-    defer rows.Close()
     
-    row_counter := 0
-    for rows.Next() {
+    for i := 0 ; i < nrows && rows.Next() ; i++ {
 		err := rows.Scan(
-            &cols[0][row_counter], &cols[1][row_counter], &cols[2][row_counter], 
-            &cols[3][row_counter], &cols[4][row_counter], &cols[5][row_counter], 
-            &cols[6][row_counter], &cols[7][row_counter], &cols[8][row_counter], 
-            &cols[9][row_counter], &cols[10][row_counter], &cols[11][row_counter], 
-            &cols[12][row_counter])
+            &cols[0][i], &cols[1][i], &cols[2][i], &cols[3][i], &cols[4][i], &cols[5][i], &cols[6][i], 
+            &cols[7][i], &cols[8][i], &cols[9][i], &cols[10][i], &cols[11][i], &cols[12][i])
 		
 		if err != nil {	log.Fatal(err) }
-        row_counter++
 	}
 
-    max_val := 1e-12
-    min_val := 1e12
-    for i:= 0 ; i < len(cols) ; i++ {
-        for j := 0 ; j < len(cols[0]) ; j++ {
-            if cols[i][j] > max_val {
-                max_val = cols[i][j]
-            }
-            if cols[i][j] < min_val {
-                min_val = cols[i][j]
+
+    min_val := config.Min_val
+    max_val := config.Max_val
+    if config.Autoscale {
+        max_val = 1e-12
+        min_val = 1e12
+        for i:= 0 ; i < len(cols) ; i++ {
+            for j := 0 ; j < len(cols[0]) ; j++ {
+                //fmt.Printf("min: %f, max: %f, this: %f\n", min_val, max_val, cols[i][j])
+                if cols[i][j] > max_val {
+                    max_val = cols[i][j]
+                }
+                if cols[i][j] < min_val {
+                    min_val = cols[i][j]
+                }
             }
         }
     }
 
-    num_counts := 256
-    hist_vals := make([]float64, num_counts)
-    hist_val_inc := (max_val - min_val) / float64(num_counts)
+    hist_vals := make([]float64, config.Nhist_points)
+    hist_val_inc := (max_val - min_val) / float64(config.Nhist_points)
     hist_val := min_val
     for i := range hist_vals {
         hist_vals[i] = hist_val
@@ -160,7 +211,7 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     }
 
  
-    histogram := get_histogram(cols[0], min_val, max_val, num_counts)
+    histogram := get_histogram(cols[0], min_val, max_val, config.Nhist_points)
     img := get_image("TestName", histogram, hist_vals, col_names[0])
 
     width := img.Bounds().Dx()
@@ -185,7 +236,7 @@ func homepage(w http.ResponseWriter, r *http.Request) {
             }
             if col_counter < ncols {
                 fmt.Printf("col_counter / ncols: %d / %d\n", col_counter, ncols)
-                histogram := get_histogram(cols[col_counter], min_val, max_val, num_counts)
+                histogram := get_histogram(cols[col_counter], min_val, max_val, config.Nhist_points)
                 img := get_image("TestName", histogram, hist_vals, col_names[col_counter])
                 col_counter++
                 sp  := image.Point{j*width, i*height}
@@ -194,7 +245,6 @@ func homepage(w http.ResponseWriter, r *http.Request) {
             }
         }
     }
-
 
     buffer := new(bytes.Buffer)
     if err := png.Encode(buffer, rgba); err != nil {
@@ -208,55 +258,6 @@ func homepage(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-func insert(w http.ResponseWriter, r *http.Request) {
-
-	//fmt.Fprintf(w, "GET params were: %s", r.URL.Query());
-
-	var rowCount int64 = 0
-
-	// Pull values from URL into local variables
-	paramRed := r.URL.Query().Get("red")
-	paramGreen := r.URL.Query().Get("green")
-	paramBlue := r.URL.Query().Get("blue")
-	paramFlowrate := r.URL.Query().Get("flowrate")
-	paramSalinity := r.URL.Query().Get("salinity")
-	paramTimeSampled := r.URL.Query().Get("timesampled")
-  	
-  	if paramRed != "" && paramGreen != "" && paramBlue != "" && 
-  	   paramFlowrate != "" && paramSalinity != "" && paramTimeSampled != "" {
-
-    	
-		db, err := sql.Open("sqlite3", "./database.db")
-
-	    if err != nil {	fmt.Println("Failed to create the db handle") }
-
-	    stmt, err := db.Prepare("INSERT INTO Samples( red, green, blue, flowrate, salinity, timesampled ) VALUES(?,?,?,?,?,?)")
-
-		if err != nil {
-			log.Fatal(err)
-		}
-		res, err := stmt.Exec(paramRed, paramGreen, paramBlue, paramFlowrate, paramSalinity, paramTimeSampled)
-		if err != nil {
-			log.Fatal(err)
-		}
-		lastId, err := res.LastInsertId()
-		if err != nil {
-			log.Fatal(err)
-		}
-		rowCount, err = res.RowsAffected()
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("ID = %d, affected = %d\n", lastId, rowCount)
-    }
-
-    if rowCount == 1 {
-    	fmt.Fprintf(w, "success")
-	}else{
-		fmt.Fprintf(w, "failure")
-	}
-}
-
 func get_image(name string, data []float64, axis []float64, xaxis_label string) image.Image {
     graph := chart.Chart{
         XAxis: chart.XAxis{
@@ -265,7 +266,7 @@ func get_image(name string, data []float64, axis []float64, xaxis_label string) 
             Style:     chart.StyleShow(),
         },
         YAxis: chart.YAxis{
-            Name:      "Count",
+            Name:      "log10(Count)",
             NameStyle: chart.StyleShow(),
             Style:     chart.StyleShow(),
         },
@@ -273,8 +274,10 @@ func get_image(name string, data []float64, axis []float64, xaxis_label string) 
             chart.ContinuousSeries{
                 Style: chart.Style{
                     Show:        true,
-                    StrokeColor: chart.GetDefaultColor(0).WithAlpha(64),
-                    FillColor:   chart.GetDefaultColor(0).WithAlpha(64),
+                    StrokeColor: drawing.Color{R: 0, G: 0, B: 0, A: 255},
+                    FillColor:   drawing.Color{R: 0, G: 0, B: 0, A: 255},
+                    //StrokeColor: chart.GetDefaultColor(0).WithAlpha(64),
+                    //FillColor:   chart.GetDefaultColor(0).WithAlpha(64),
                 },
                 XValues: axis,
                 YValues: data,
@@ -298,8 +301,43 @@ func get_histogram(data []float64, min float64, max float64, num_counts int) []f
     slope := (c-d)/(a-b)
     intercept := (d*a-b*c)/(a-b)
     for i := 0 ; i < len(data) ; i++ {
-        counts[int(data[i]*slope + intercept + 0.5)]++
+        if data[i] >= min && data[i] <= max {
+            counts[int(data[i]*slope + intercept + 0.5)]++
+        }
+    }
+    for i := 0 ; i < len(counts) ; i++ {
+        if counts[i] != 0 {
+            counts[i] = math.Log10(counts[i])
+        }
     }
     return counts
+}
+
+func get_config() Configuration {
+    // Read config file or create default config
+    config := Configuration{}
+    new_config := false
+    if _, err := os.Stat(config_file_name); os.IsNotExist(err) {
+        new_config = true
+    }
+    file, _ := os.OpenFile(config_file_name, os.O_RDWR | os.O_CREATE, 0755)
+    defer file.Close()
+
+    if new_config {
+        config.Samp_rate = 4
+        config.Nrows = int(config.Samp_rate*60*60)
+        config.Database_name = "/home/pi/fccFreqs.db"
+        config.Autoscale = true
+        config.Min_val = -100.0
+        config.Max_val = 0.0
+        config.Nhist_points = 256
+    }else{
+        decoder := json.NewDecoder(file)
+        err := decoder.Decode(&config)
+        if err != nil {
+            fmt.Println("error:", err)
+        }
+    }
+    return config
 }
 
